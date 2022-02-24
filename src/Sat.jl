@@ -1,3 +1,4 @@
+include("Luby.jl")
 using DataStructures
 Var = UInt
 
@@ -44,7 +45,8 @@ end
 INCREMENT_MULTIPLIER = 1.1
 RESCALE_PERIOD = 500
 DIVISOR = INCREMENT_MULTIPLIER ^ RESCALE_PERIOD
-RANDOM_BRANCH_PERIOD = 200
+FACTOR = 32
+
 mutable struct SATInstance
     clauses::Array{Clause}
     n_vars::UInt
@@ -55,6 +57,7 @@ mutable struct SATInstance
     watchers::Array{Dict{ClauseIndex, UInt}}
     activities::Array{Float64}
     n_conflicts::UInt
+    n_total_conflicts::UInt
     bonus::Float64
 end
 
@@ -65,7 +68,7 @@ function SATInstance(clauses::Array{Clause}, n_vars::UInt)
     watchers = [Dict() for _ in 1:2 * n_vars]
     activities = Float64[0 for _ in 1:n_vars]
 
-    SATInstance(clauses, n_vars, 0, assignments, decisions, watchlist, watchers, activities, 0, 0)
+    SATInstance(clauses, n_vars, 0, assignments, decisions, watchlist, watchers, activities, 0, 0, 0)
 end
 
 function load_sat(filename::String) SATInstance
@@ -144,7 +147,10 @@ function initialize_watchlist!(sat::SATInstance)
     end
 end
 
-function initialize_activities!(sat::SATInstance)
+function reset_activities!(sat::SATInstance)
+    for i in 1:sat.n_vars
+        sat.activities[i] = 0
+    end
     for clause in sat.clauses
         for literal in clause
             sat.activities[literal.var] += 1
@@ -154,6 +160,10 @@ function initialize_activities!(sat::SATInstance)
     sat.n_conflicts = 0
 end
 
+function reset_assignments!(sat::SATInstance)
+    sat.decision_level = 0
+    backtrack!(sat)
+end
 
 function simplify!(sat::SATInstance) Bool
     sat.decision_level = 0
@@ -293,59 +303,68 @@ function solve(sat::SATInstance) Bool
     end
 
     initialize_watchlist!(sat)
-    initialize_activities!(sat)
 
     @info "Solving problem with $(length(filter(n -> n === nothing, sat.assignments))) variables and $(length(sat.clauses)) clauses"
+    restart_sequence = Luby(UInt(FACTOR))
     
-    should_branch = true
     while true
-        if should_branch && !decide!(sat)
-            @info "Ran out of variables to assign"
-            return terminate(sat, true)
-        end
-
-        conflict_clause = propagate!(sat)
-        if conflict_clause === nothing
-            should_branch = true
-            continue
-        end
-
-        # learn form conflict
-        learned_clause, encountered_vars::Set{Var} = learn(sat, conflict_clause)
-
-        # if nothing can be learnt, then the instance is UNSAT
-        if learned_clause === nothing
-            @info "Cannot learn from conflict clause"
-            return terminate(sat, false)
-        end
+        reset_activities!(sat)
+        reset_assignments!(sat)
+        max_conflicts = get(restart_sequence)
+        next!(restart_sequence)
         
-        # @debug "Learned clause $(learned_clause)"
-        should_branch = false  # force continued propagation
-        sat.decision_level = compute_decision_level(sat, learned_clause)
-        # @debug "Backtracking to decision level $(sat.decision_level)"
-        backtrack!(sat)
-
-        # if the clause has only one element, then we have backtracked to a state without any branching
-        if length(learned_clause) === 1
-            assignment = first(learned_clause)
-            if sat.assignments[assignment.var] !== nothing && sat.assignments[assignment.var].is_pos != assignment.is_pos
-                @info "Conflict at decision level 0"
-                return terminate(sat, false)
+        should_decide = true
+        while sat.n_conflicts < max_conflicts
+            if should_decide && !decide!(sat)
+                @info "Ran out of variables to assign"
+                return terminate(sat, true)
             end
 
-            assign!(sat, assignment.var, assignment.is_pos)
-            continue
-        end
-        
-        # learn the derived clause
-        if !add_clause!(sat, learned_clause)
-            @info "Learned clause has no UIP"
-            terminate(sat, false)
-        end
+            conflict_clause = propagate!(sat)
+            if conflict_clause === nothing
+                should_decide = true
+                continue
+            end
 
-        # update activity scores
-        update_activities!(sat, encountered_vars)
+            # learn form conflict
+            learned_clause, encountered_vars::Set{Var} = learn(sat, conflict_clause)
+
+            # if nothing can be learnt, then the instance is UNSAT
+            if learned_clause === nothing
+                @info "Cannot learn from conflict clause"
+                return terminate(sat, false)
+            end
+            
+            # @debug "Learned clause $(learned_clause)"
+            should_decide = false  # force continued propagation
+            sat.decision_level = compute_decision_level(sat, learned_clause)
+            # @debug "Backtracking to decision level $(sat.decision_level)"
+            backtrack!(sat)
+
+            # if the clause has only one element, then we have backtracked to a state without any decision
+            if length(learned_clause) === 1
+                assignment = first(learned_clause)
+                if sat.assignments[assignment.var] !== nothing && sat.assignments[assignment.var].is_pos != assignment.is_pos
+                    @info "Conflict at decision level 0"
+                    return terminate(sat, false)
+                end
+
+                assign!(sat, assignment.var, assignment.is_pos)
+                continue
+            end
+            
+            # learn the derived clause
+            if !add_clause!(sat, learned_clause)
+                @info "Learned clause has no UIP"
+                terminate(sat, false)
+            end
+
+            # update activity scores
+            update_activities!(sat, encountered_vars)
+        end
+        # @info "Restarting at decision level $(sat.decision_level)"
     end
+    
 end
 
 @inline function decide!(sat::SATInstance) Bool
@@ -355,7 +374,6 @@ end
     end
     
     sat.decision_level += 1
-    # @debug "Deciding $(literal)"
     assign!(sat, literal.var, literal.is_pos)
 
     true
@@ -378,7 +396,22 @@ function evsids(sat::SATInstance) Union{Literal, Nothing}
         return nothing
     end
     
-    Literal(max_var, true)
+    Literal(max_var, false)
+end
+
+function random(sat::SATInstance) Union{Literal, Nothing}
+    choices = Set()
+    for (i, assignment) in enumerate(sat.assignments)
+        if assignment === nothing
+            push!(choices, i)
+        end
+    end
+    
+    if length(choices) == 0
+        return nothing
+    end
+    
+    Literal(rand(choices), rand((true, false)))
 end
 
 function jeroslow_wang(sat::SATInstance) Union{Literal, Nothing}
@@ -534,7 +567,7 @@ function learn(sat::SATInstance, conflict_clause::Clause) Union{Clause, Nothing}
         end
         implied_literal = pop!(last_level_literals)
 
-        # ignore literals assigned by branching
+        # ignore literals assigned by decisions
         if sat.assignments[implied_literal.var].antecedent === nothing
             continue
         end
@@ -622,10 +655,11 @@ function update_activities!(sat::SATInstance, vars::Set{Var})
         sat.activities[var] += sat.bonus
     end
     sat.n_conflicts += 1
+    sat.n_total_conflicts += 1
     sat.bonus *= INCREMENT_MULTIPLIER
 
     # periodic decay
-    if (sat.n_conflicts + 1) % RESCALE_PERIOD == 0
+    if (sat.n_total_conflicts + 1) % RESCALE_PERIOD == 0
         sat.bonus /= DIVISOR
         for i in 1:length(sat.activities)
             sat.activities[i] /= DIVISOR
