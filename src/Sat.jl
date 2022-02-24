@@ -41,24 +41,31 @@ mutable struct Assignment
     antecedent::Union{ClauseIndex, Nothing}
 end
 
-
+INCREMENT_MULTIPLIER = 1.1
+RESCALE_PERIOD = 500
+DIVISOR = INCREMENT_MULTIPLIER ^ RESCALE_PERIOD
+RANDOM_BRANCH_PERIOD = 200
 mutable struct SATInstance
     clauses::Array{Clause}
     n_vars::UInt
     decision_level::UInt
     assignments::Array{Union{Assignment, Nothing}}
     decisions::Array{Var}
-    watchlist::Array{Array{LiteralIndex}}
-    watchers::Array{Set{ClauseIndex}}
+    watchlist::Array{LiteralIndex}
+    watchers::Array{Dict{ClauseIndex, UInt}}
+    activities::Array{Float64}
+    n_conflicts::UInt
+    bonus::Float64
 end
 
 function SATInstance(clauses::Array{Clause}, n_vars::UInt)
     assignments = Array{Union{Assignment, Nothing}}(nothing, n_vars)
     decisions = Var[]
-    watchlist = Array{LiteralIndex}[] # set up later
-    watchers = [Set() for _ in 1:2 * n_vars]
+    watchlist = LiteralIndex[] # set up later
+    watchers = [Dict() for _ in 1:2 * n_vars]
+    activities = Float64[0 for _ in 1:n_vars]
 
-    SATInstance(clauses, n_vars, 0, assignments, decisions, watchlist, watchers)
+    SATInstance(clauses, n_vars, 0, assignments, decisions, watchlist, watchers, activities, 0, 0)
 end
 
 function load_sat(filename::String) SATInstance
@@ -99,11 +106,6 @@ end
     push!(sat.decisions, var)
 end
 
-@inline function unassign!(sat::SATInstance, var::Var)
-    sat.assignments[var] = nothing
-    pop!(sat.decisions)
-end
-
 function terminate(sat::SATInstance, is_sat::Bool) Bool
     if is_sat
         # make default assignmentse if SAT
@@ -118,7 +120,7 @@ function terminate(sat::SATInstance, is_sat::Bool) Bool
     is_sat
 end
 
-function get_watchlist(c::Clause) Array{LiteralIndex}
+@inline function get_watchlist(c::Clause) Array{LiteralIndex}
     output = LiteralIndex[]
     for (i, literal) in enumerate(c)
         if i == 3
@@ -131,18 +133,25 @@ function get_watchlist(c::Clause) Array{LiteralIndex}
 end
 
 function initialize_watchlist!(sat::SATInstance)
-    sat.watchlist = Array{LiteralIndex}[[0, 0] for _ in 1:length(sat.clauses)]
+    sat.watchlist = LiteralIndex[0 for _ in 1:2*length(sat.clauses)]
     for (i, clause) in enumerate(sat.clauses)
         watch_1, watch_2 = get_watchlist(clause)
-        sat.watchlist[i][1] = watch_1
-        sat.watchlist[i][2] = watch_2
-    end
+        sat.watchlist[2*i-1] = watch_1
+        sat.watchers[watch_1][i] = 2
 
-    for (clause_idx, literals) in enumerate(sat.watchlist)
-        for literal in literals
-            push!(sat.watchers[literal], clause_idx)
+        sat.watchlist[2*i] = watch_2
+        sat.watchers[watch_2][i] = 1
+    end
+end
+
+function initialize_activities!(sat::SATInstance)
+    for clause in sat.clauses
+        for literal in clause
+            sat.activities[literal.var] += 1
         end
     end
+    sat.bonus = maximum(sat.activities) / 2
+    sat.n_conflicts = 0
 end
 
 
@@ -284,6 +293,7 @@ function solve(sat::SATInstance) Bool
     end
 
     initialize_watchlist!(sat)
+    initialize_activities!(sat)
 
     @info "Solving problem with $(length(filter(n -> n === nothing, sat.assignments))) variables and $(length(sat.clauses)) clauses"
     
@@ -301,7 +311,7 @@ function solve(sat::SATInstance) Bool
         end
 
         # learn form conflict
-        learned_clause = learn(sat, conflict_clause)
+        learned_clause, encountered_vars::Set{Var} = learn(sat, conflict_clause)
 
         # if nothing can be learnt, then the instance is UNSAT
         if learned_clause === nothing
@@ -332,11 +342,14 @@ function solve(sat::SATInstance) Bool
             @info "Learned clause has no UIP"
             terminate(sat, false)
         end
+
+        # update activity scores
+        update_activities!(sat, encountered_vars)
     end
 end
 
 @inline function decide!(sat::SATInstance) Bool
-    literal = jeroslow_wang(sat)
+    literal = evsids(sat)
     if literal === nothing
         return false
     end
@@ -346,6 +359,26 @@ end
     assign!(sat, literal.var, literal.is_pos)
 
     true
+end
+
+function evsids(sat::SATInstance) Union{Literal, Nothing}
+    max_score = 0.0
+    max_var::Union{Var, Nothing} = nothing
+    for (i, score) in enumerate(sat.activities)
+        if sat.assignments[i] !== nothing
+            continue
+        end
+
+        if score > max_score
+            max_var = i
+            max_score = score
+        end
+    end
+    if max_var === nothing
+        return nothing
+    end
+    
+    Literal(max_var, true)
 end
 
 function jeroslow_wang(sat::SATInstance) Union{Literal, Nothing}
@@ -406,25 +439,14 @@ function propagate!(sat::SATInstance) Union{Clause, Nothing}
             decision, !sat.assignments[decision].is_pos
         ))
         
-        for clause_idx in copy(sat.watchers[watched_index])
-            
-            # get index of the watched literal in the list of two watched literals
-            which_watch = 0
-            for (i, watched) in enumerate(sat.watchlist[clause_idx])
-                if watched == watched_index
-                    which_watch = i
-                end
-            end
+        for (clause_idx, which_watch) in copy(sat.watchers[watched_index])
             other_literal = index_to_literal(
-                sat.watchlist[clause_idx][3 - which_watch]
+                sat.watchlist[2*clause_idx - 2 + which_watch]
             )
 
-            # try to find a replacement watched literal
-            replacement = other_literal
-
             # quick check against the other watched literal in case it is assigned
-            if sat.assignments[replacement.var] !== nothing
-                if sat.assignments[replacement.var].is_pos == replacement.is_pos
+            if sat.assignments[other_literal.var] !== nothing
+                if sat.assignments[other_literal.var].is_pos == other_literal.is_pos
                     # clause is SAT
                     continue
                 else
@@ -433,26 +455,39 @@ function propagate!(sat::SATInstance) Union{Clause, Nothing}
                 end
             end
 
+            # we now know that the other watched literal isn't assigned
+            replacement = nothing
+
+            # see if there is some other unassigned literal we can watch
             for literal in sat.clauses[clause_idx]
-                # ignore all falsified literals
-                if (sat.assignments[literal.var] !== nothing && sat.assignments[literal.var].is_pos == !literal.is_pos) || literal == replacement
+                # ignore all falsified literals 
+                if sat.assignments[literal.var] !== nothing
+                    # if clause is SAT, just do nothing
+                    if sat.assignments[literal.var].is_pos == literal.is_pos
+                        replacement = literal
+                        break
+                    end
                     continue
                 end
+                # ignore the other literal
+                if literal == other_literal
+                    continue
+                end
+                # found a viable replacement!
                 replacement = literal
                 break
             end
-
             
-            if replacement == other_literal
-                # unit clause! (already checked that the other literal isn't assigned)
-                push!(assignments, (replacement, clause_idx))
+            if replacement === nothing
+                # unit clause!
+                push!(assignments, (other_literal, clause_idx))
             else
                 # found replacement; update watchlist
                 replacement_index = literal_to_index(replacement)
 
                 delete!(sat.watchers[watched_index], clause_idx)
-                push!(sat.watchers[replacement_index], clause_idx)
-                sat.watchlist[clause_idx][which_watch] = replacement_index
+                sat.watchers[replacement_index][clause_idx] = which_watch
+                sat.watchlist[2*clause_idx+1-which_watch] = replacement_index
             end
         end
         
@@ -475,11 +510,11 @@ function propagate!(sat::SATInstance) Union{Clause, Nothing}
     nothing
 end
 
-function learn(sat::SATInstance, conflict_clause::Clause) Union{Clause, Nothing}
+function learn(sat::SATInstance, conflict_clause::Clause) Union{Clause, Nothing}, Set{Var}
     # learn using first UIP
 
     learned_clause = copy(conflict_clause)
-
+    encountered_variables = Set()
     # continuously resolve with antecedents of literals implied
     # at the current decision level until UIP
     last_level_literals = Stack{Literal}()
@@ -495,7 +530,7 @@ function learn(sat::SATInstance, conflict_clause::Clause) Union{Clause, Nothing}
     while num_last_level_literals > 1
         # this is in case we're at decision level 0 and have presolved antecedents
         if length(last_level_literals) == 0
-            return nothing
+            return nothing, encountered_variables
         end
         implied_literal = pop!(last_level_literals)
 
@@ -508,6 +543,7 @@ function learn(sat::SATInstance, conflict_clause::Clause) Union{Clause, Nothing}
         num_last_level_literals -= 1
         antecedent = sat.clauses[sat.assignments[implied_literal.var].antecedent]
         delete!(learned_clause, implied_literal)
+        push!(encountered_variables, implied_literal.var)
         for literal in antecedent
             if literal in learned_clause || literal == Literal(implied_literal.var, !implied_literal.is_pos)
                 continue
@@ -519,8 +555,9 @@ function learn(sat::SATInstance, conflict_clause::Clause) Union{Clause, Nothing}
             end
         end
     end
-
-    learned_clause
+    encountered_variables = union(encountered_variables, Set([l.var for l in learned_clause]))
+    
+    learned_clause, encountered_variables
 end
 
 @inline function compute_decision_level(sat::SATInstance, learned_clause::Clause) UInt
@@ -536,14 +573,18 @@ end
 end
 
 @inline function backtrack!(sat::SATInstance)
-    while length(sat.decisions) > 0
-        decision = sat.decisions[length(sat.decisions)]
+    last_index = length(sat.decisions)
+    while last_index > 0
+        decision = sat.decisions[last_index]
 
         if sat.assignments[decision].decision_level == sat.decision_level
-            return
+            break
         end
-        unassign!(sat, decision)
+
+        sat.assignments[decision] = nothing
+        last_index -= 1
     end
+    sat.decisions = sat.decisions[1:last_index]
 end
 
 function add_clause!(sat::SATInstance, clause::Clause) Bool
@@ -566,13 +607,30 @@ function add_clause!(sat::SATInstance, clause::Clause) Bool
 
     unit_index = literal_to_index(unit_literal)
     other_index = literal_to_index(other_literal)
-    push!(sat.watchlist, [unit_index, other_index])
+    push!(sat.watchlist, other_index)
+    push!(sat.watchlist, unit_index)
     learned_clause_idx = UInt(length(sat.clauses))
-    push!(sat.watchers[unit_index], learned_clause_idx)
-    push!(sat.watchers[other_index], learned_clause_idx)
+    sat.watchers[unit_index][learned_clause_idx] = 1
+    sat.watchers[other_index][learned_clause_idx] = 2
     assign!(sat, unit_literal.var, unit_literal.is_pos, learned_clause_idx)
 
     true
+end
+
+function update_activities!(sat::SATInstance, vars::Set{Var})
+    for var in vars
+        sat.activities[var] += sat.bonus
+    end
+    sat.n_conflicts += 1
+    sat.bonus *= INCREMENT_MULTIPLIER
+
+    # periodic decay
+    if (sat.n_conflicts + 1) % RESCALE_PERIOD == 0
+        sat.bonus /= DIVISOR
+        for i in 1:length(sat.activities)
+            sat.activities[i] /= DIVISOR
+        end
+    end
 end
 
 function verify(sat::SATInstance) Bool

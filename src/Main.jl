@@ -3,6 +3,8 @@ __precompile__()
 import Dates
 using ArgParse
 using Base.Filesystem
+using Profile
+import ProfileView
 
 include("Sat.jl")
 
@@ -31,12 +33,25 @@ function parse_commandline()
     parse_args(s)
 end
 
+function profile_test(sat::SATInstance)
+    solve(sat)
+end
+
+function profile(sat::SATInstance)
+    ProfileView.@profview profile_test(sat)
+    c = Condition()
+    wait(c)
+    exit()
+end
+
 function main()
     parsed_args = parse_commandline()
     file = parsed_args["file"]
     @info "Loading file $(file) into a SAT instance"
     
     sat = load_sat(file)
+
+    # profile(sat)
 
     start_time = Dates.now()
     is_sat = solve(sat)
