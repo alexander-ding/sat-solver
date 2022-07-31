@@ -31,16 +31,16 @@ function parse_commandline()
     parse_args(s)
 end
 
-# function profile_test(sat::SATInstance)
-#     solve(sat)
-# end
+function profile_test(sat::SATInstance)
+    solve(sat)
+end
 
-# function profile(sat::SATInstance)
-#     ProfileView.@profview profile_test(sat)
-#     c = Condition()
-#     wait(c)
-#     exit()
-# end
+function profile(sat::SATInstance)
+    ProfileView.@profview profile_test(sat)
+    c = Condition()
+    wait(c)
+    exit()
+end
 
 function main()
     parsed_args = parse_commandline()

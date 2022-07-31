@@ -1,8 +1,5 @@
 #!/bin/bash
 
-########################################
-############# CSCI 2951-O ##############
-########################################
 E_BADARGS=65
 if [ $# -ne 1 ]
 then
@@ -12,5 +9,4 @@ fi
 	
 input=$1
 
-# Update this file with instructions on how to run your code given an input
 julia --project=@. --optimize=3 --inline=yes --math-mode=fast src/Main.jl $input
