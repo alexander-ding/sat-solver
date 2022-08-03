@@ -8,7 +8,7 @@ A CDCL [SAT solver](https://en.wikipedia.org/wiki/Boolean_satisfiability_problem
 ## Features
 
 1. Preprocessing with pure literal elimination
-1. Branching xponential variable state independent decaying sum (EVSIDS) heuristic for variable decision
+1. Branching exponential variable state independent decaying sum (EVSIDS) heuristic for variable decision
 1. Boolean constraint propagation
 1. Conflict-driven clause learning
 1. Random restarts with a Luby sequence
