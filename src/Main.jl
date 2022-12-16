@@ -3,10 +3,12 @@ __precompile__()
 import Dates
 using ArgParse
 using Base.Filesystem
+# using ProfileView
 
 include("Sat.jl")
 
-function serialize(sat::SATInstance) String
+function serialize(sat::SATInstance)
+    String
     flags = []
     for (i, flag) in enumerate(sat.assignments)
         if flag === nothing
@@ -24,29 +26,29 @@ function parse_commandline()
     s = ArgParseSettings()
     @add_arg_table s begin
         "file"
-            help = "CNF file"
-            required = true
+        help = "CNF file"
+        required = true
     end
 
     parse_args(s)
 end
 
-function profile_test(sat::SATInstance)
-    solve(sat)
-end
+# function profile_test(sat::SATInstance)
+#     solve(sat)
+# end
 
-function profile(sat::SATInstance)
-    ProfileView.@profview profile_test(sat)
-    c = Condition()
-    wait(c)
-    exit()
-end
+# function profile(sat::SATInstance)
+#     ProfileView.@profview profile_test(sat)
+#     c = Condition()
+#     wait(c)
+#     exit()
+# end
 
 function main()
     parsed_args = parse_commandline()
     file = parsed_args["file"]
     @info "Loading file $(file) into a SAT instance"
-    
+
     sat = load_sat(file)
 
     # profile(sat)
@@ -58,7 +60,7 @@ function main()
 
     _, filename = splitdir(file)
     stem, _ = splitext(filename)
-    
+
     if is_sat
         println("""{"Instance": "$(stem)", "Time": $(delta), "Result": "SAT", "Solution": "$(serialize(sat))"}""")
 
