@@ -15,8 +15,15 @@ A CDCL [SAT solver](https://en.wikipedia.org/wiki/Boolean_satisfiability_problem
 
 ## Usage
 
-To run the SAT solver
+Download the Julia dependencies
+
+```bash
+./compile.sh
 ```
+
+To run the SAT solver
+
+```bash
 ./run.sh <input-file>
 ```
 
