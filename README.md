@@ -26,7 +26,7 @@ The solver expects SAT instances described in [DIMACS CNF](https://jix.github.io
 
 ## Caveats
 
-I think there's a bug with the CDCL implementation, which causes it to terminate much later than it should with UNSAT instances. Help wanted 🤕
+I think there's a bug with the CDCL implementation, which causes it to terminate much later than it should with SAT instances. Help wanted 🤕
 
 ## Credits
 
